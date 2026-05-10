@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -67,6 +68,7 @@ class DPOCollector:
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self._lock = threading.Lock()
         config.dpo_pairs_dir.mkdir(parents=True, exist_ok=True)
 
     def _current_path(self) -> str:
@@ -87,16 +89,14 @@ class DPOCollector:
             return False
 
         path = self._current_path()
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "prompt": pair.prompt,
-                "chosen": pair.chosen,
-                "rejected": pair.rejected,
-                "source": pair.source,
-                "chosen_score": pair.chosen_score,
-                "rejected_score": pair.rejected_score,
-                "timestamp": pair.timestamp,
-            }, ensure_ascii=False) + "\n")
+        entry = json.dumps({
+            "prompt": pair.prompt, "chosen": pair.chosen, "rejected": pair.rejected,
+            "source": pair.source, "chosen_score": pair.chosen_score,
+            "rejected_score": pair.rejected_score, "timestamp": pair.timestamp,
+        }, ensure_ascii=False)
+        with self._lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(entry + "\n")
 
         logger.info("Paire DPO enregistrée (chosen=%.2f rejected=%.2f)", pair.chosen_score, pair.rejected_score)
         return True

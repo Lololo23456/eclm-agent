@@ -77,11 +77,17 @@ class ASTPlanner:
             return self._single_op_plan(intent, "MODIFY_BODY")
 
         if intent.action == "CREATE":
-            op_type = "CREATE_CLASS" if intent.target_type == "class" else "CREATE_FUNCTION"
+            if intent.target_type == "class":
+                op_type = "CREATE_CLASS"
+            elif intent.target_type == "module":
+                op_type = "CREATE_MODULE"
+            else:
+                op_type = "CREATE_FUNCTION"
             return self._single_op_plan(intent, op_type)
 
         if intent.action == "TEST":
-            return self._single_op_plan(intent, "CREATE_FUNCTION")
+            op_type = "CREATE_MODULE" if intent.target_type == "module" else "CREATE_FUNCTION"
+            return self._single_op_plan(intent, op_type)
 
         # Cas complexes — Ollama planifie
         plan = self._plan_via_ollama(intent, context)
@@ -112,6 +118,7 @@ class ASTPlanner:
             params={
                 "description": intent.description,
                 "constraints": list(intent.constraints),
+                "target_type": intent.target_type,
             },
         )
         return ASTOperationPlan(

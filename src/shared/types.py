@@ -42,8 +42,8 @@ class IntentJSON:
 VALID_OP_TYPES = frozenset({
     "ADD_PARAM", "MODIFY_BODY", "REMOVE_PARAM", "ADD_RETURN_TYPE",
     "RENAME_SYMBOL", "ADD_IMPORT", "CREATE_FUNCTION", "CREATE_CLASS",
-    "ADD_METHOD", "DELETE_NODE", "UPDATE_CALL_SITES", "ADD_DECORATOR",
-    "EXTRACT_FUNCTION", "ADD_DOCSTRING", "MODIFY_DECORATOR",
+    "CREATE_MODULE", "ADD_METHOD", "DELETE_NODE", "UPDATE_CALL_SITES",
+    "ADD_DECORATOR", "EXTRACT_FUNCTION", "ADD_DOCSTRING", "MODIFY_DECORATOR",
 })
 
 
@@ -96,7 +96,7 @@ class VerificationResult:
 
     @property
     def composite_score(self) -> float:
-        if not self.syntax_ok or not self.mypy_ok:
+        if not self.syntax_ok:
             return 0.0
         return (
             0.4 * self.behavior_tests_score

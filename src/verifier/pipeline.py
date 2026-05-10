@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from src.shared.config import Config
 from src.shared.types import ASTCandidate, VerificationResult
@@ -62,12 +63,44 @@ class VerificationPipeline:
         self._lint = LintScorer()
         self._sandbox: DockerSandbox | LocalSandbox = auto_sandbox(config)
 
+    def run_project_tests(self, output_dir: Path) -> dict[str, object]:
+        """Lance pytest sur l'intégralité du dossier projet généré.
+
+        Args:
+            output_dir: Dossier racine du projet généré.
+
+        Returns:
+            Dict avec passed, failed, errors, score, stdout.
+        """
+        result = self._sandbox.run_project_tests(output_dir)
+        passed = 0
+        failed = 0
+        for line in result.stdout.splitlines():
+            m = re.search(r"(\d+) passed", line)
+            if m:
+                passed = int(m.group(1))
+            m = re.search(r"(\d+) (?:failed|error)", line)
+            if m:
+                failed += int(m.group(1))
+        total = passed + failed
+        score = passed / total if total > 0 else (0.0 if result.exit_code != 0 else 1.0)
+        return {
+            "passed": passed,
+            "failed": failed,
+            "total": total,
+            "score": score,
+            "stdout": result.stdout,
+            "timed_out": result.timed_out,
+        }
+
     def verify(
         self,
         candidates: list[ASTCandidate],
         behavior_tests: list[str],
         impl_tests: list[str] | None = None,
         property_tests: list[str] | None = None,
+        project_files: dict[str, str] | None = None,
+        target_filename: str = "solution.py",
     ) -> VerificationResult:
         """Vérifie tous les candidats et retourne le meilleur résultat.
 
@@ -92,6 +125,8 @@ class VerificationPipeline:
                 behavior_tests=behavior_tests,
                 impl_tests=impl_tests or [],
                 property_tests=property_tests or [],
+                project_files=project_files,
+                target_filename=target_filename,
             )
             for c in candidates
         ]
@@ -110,6 +145,8 @@ class VerificationPipeline:
         behavior_tests: list[str],
         impl_tests: list[str],
         property_tests: list[str],
+        project_files: dict[str, str] | None = None,
+        target_filename: str = "solution.py",
     ) -> VerificationResult:
         syntax_ok = self._syntax.check(candidate.code)
         if not syntax_ok:
@@ -127,7 +164,13 @@ class VerificationPipeline:
         mypy_ok, mypy_error = self._types.check(candidate.code)
         lint_score = self._lint.score(candidate.code)
 
-        behavior_score = self._run_tests(candidate.code, behavior_tests)
+        if project_files and behavior_tests:
+            behavior_score = self._run_tests_in_project(
+                candidate.code, behavior_tests, project_files, target_filename
+            )
+        else:
+            behavior_score = self._run_tests(candidate.code, behavior_tests)
+
         impl_score = self._run_tests(candidate.code, impl_tests) if impl_tests else 1.0
         property_score = (
             self._run_tests(candidate.code, property_tests) if property_tests else 1.0
@@ -148,6 +191,20 @@ class VerificationPipeline:
         if not tests:
             return 1.0
         result: SandboxResult = self._sandbox.run(code, tests)
+        if result.timed_out:
+            return 0.0
+        return _parse_pytest_score(result.stdout)
+
+    def _run_tests_in_project(
+        self,
+        code: str,
+        tests: list[str],
+        project_files: dict[str, str],
+        target_filename: str,
+    ) -> float:
+        result: SandboxResult = self._sandbox.run_with_project_files(
+            code, target_filename, tests, project_files
+        )
         if result.timed_out:
             return 0.0
         return _parse_pytest_score(result.stdout)

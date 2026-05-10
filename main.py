@@ -68,6 +68,50 @@ def _print_response(response: AgentResponse) -> None:
             print(_c("─" * 52, _DIM))
 
 
+def _print_critic_results(issues: list[object], test_results: dict[str, object], fix_pass: int = 0) -> None:
+    from src.orchestrator.critic import CriticIssue
+
+    if fix_pass > 0:
+        print(f"\n  {_c(f'── Passe de correction #{fix_pass} ──', _BOLD, _YELLOW)}")
+
+    # Résultats des tests réels
+    passed = test_results.get("passed", 0)
+    failed = test_results.get("failed", 0)
+    total = test_results.get("total", 0)
+    score = float(test_results.get("score", 0.0))
+
+    if total > 0:
+        score_color = _GREEN if score >= 0.8 else _YELLOW if score >= 0.5 else _RED
+        print(f"\n  {_c('Tests projet:', _BOLD)}  "
+              f"{_c(str(passed), _GREEN)} passés / "
+              f"{_c(str(failed), _RED if failed else _DIM)} échoués  "
+              f"(score {_c(f'{score:.0%}', score_color, _BOLD)})")
+        if failed and test_results.get("stdout"):
+            # Montrer les 8 premières lignes des échecs
+            lines = str(test_results["stdout"]).splitlines()
+            fail_lines = [l for l in lines if "FAILED" in l or "ERROR" in l or "assert" in l.lower()][:8]
+            if fail_lines:
+                print(_c("  " + "\n  ".join(fail_lines), _DIM))
+    else:
+        print(f"\n  {_c('Tests projet:', _BOLD)} {_c('aucun test trouvé', _DIM)}")
+
+    # Issues du Critic
+    critic_issues = [i for i in issues if isinstance(i, CriticIssue)]
+    errors = [i for i in critic_issues if i.severity == "error"]
+    warnings = [i for i in critic_issues if i.severity == "warning"]
+
+    if not critic_issues:
+        print(f"  {_c('Critic:', _BOLD)} {_c('✓ aucune incohérence cross-fichiers', _GREEN)}")
+    else:
+        print(f"  {_c('Critic:', _BOLD)} "
+              f"{_c(str(len(errors)) + ' erreur(s)', _RED) if errors else ''}"
+              f"{_c('  ' + str(len(warnings)) + ' avertissement(s)', _YELLOW) if warnings else ''}")
+        for issue in critic_issues[:8]:
+            icon = _c("✗", _RED) if issue.severity == "error" else _c("⚠", _YELLOW)
+            print(f"    {icon}  {_c(issue.file, _CYAN)}  {issue.description}")
+    print()
+
+
 def _print_project_summary(session: ProjectSession) -> None:
     done = session.done_count
     total = session.total
@@ -79,9 +123,12 @@ def _print_project_summary(session: ProjectSession) -> None:
     print(f"  {bar} {done}/{total} tâches")
     if failed:
         print(f"  {_c(f'{failed} échouée(s)', _RED)}")
+    if session.output_dir:
+        print(f"  {_c('Dossier:', _DIM)} {_c(session.output_dir, _CYAN)}")
     files = session.all_files_created
     if files:
-        print(f"  {_c('Fichiers créés:', _DIM)} {', '.join(files)}")
+        rel = [Path(f).name for f in files]
+        print(f"  {_c('Fichiers:', _DIM)} {', '.join(rel)}")
     print()
 
 
@@ -90,14 +137,45 @@ def _run_project(
     project_agent: ProjectAgent,
     project_root: Path,
 ) -> None:
-    print(_c(f"\n  Planification du projet...", _DIM))
+    print(_c("\n  Planification du projet (32B)...", _DIM))
     session = project_agent.plan(brief)
-    print(f"  {_c('✓', _GREEN)} {session.total} tâches planifiées (session: {session.id})")
+
+    # ── Résumé du plan ────────────────────────────────────────────────────────
+    print(f"  {_c('✓', _GREEN, _BOLD)} {session.total} tâches planifiées — session: {_c(session.id, _CYAN)}")
+    if session.tech_stack:
+        print(f"  {_c('Stack:', _DIM)} {', '.join(session.tech_stack)}")
+    complexity_counts = {"low": 0, "medium": 0, "high": 0}
+    for t in session.tasks:
+        complexity_counts[t.complexity] = complexity_counts.get(t.complexity, 0) + 1
+    print(
+        f"  {_c('Complexité:', _DIM)} "
+        f"{complexity_counts['low']}× · (7B)  "
+        f"{complexity_counts['medium']}× ◆ (7B)  "
+        f"{complexity_counts['high']}× ★ (32B)"
+    )
     print()
+
+    # ── Review Gate — demande confirmation si décision critique ───────────────
+    if session.review_gate:
+        print(f"  {_c('?', _YELLOW, _BOLD)} {_c('Décision architecturale :', _BOLD)}")
+        print(f"  {session.review_gate}")
+        print(f"  {_c('(Entrée pour continuer, ou tape ta réponse)', _DIM)}")
+        try:
+            answer = input(_c("  → ", _YELLOW, _BOLD)).strip()
+            if answer:
+                session.brief = f"{session.brief}\n[Décision utilisateur: {answer}]"
+        except (EOFError, KeyboardInterrupt):
+            print(_c("\n  Annulé.", _DIM))
+            return
+        print()
 
     def on_start(task: object) -> None:  # type: ignore[type-arg]
         from src.orchestrator.project import TaskRecord as TR
-        assert isinstance(task, TR)
+        if not isinstance(task, TR):
+            # Fix-loop task (_FixTask) — afficher le label sans numéro de tâche
+            label = getattr(task, "label", str(task))
+            print(f"  {_c('[fix]', _DIM, _BOLD)} {_c(label, _YELLOW)}")
+            return
         print(f"  {_c('[' + str(task.index + 1) + '/' + str(session.total) + ']', _DIM, _BOLD)} {task.label}")
 
     def on_done(task: object, resp: object) -> None:  # type: ignore[type-arg]
@@ -111,8 +189,21 @@ def _run_project(
         else:
             print(f"      {_c('✗', _RED)} {resp.message[:80]}")
 
-    project_agent.execute(session, on_task_start=on_start, on_task_done=on_done)
+    def on_critic(issues: object, test_results: object, fix_pass: object = 0) -> None:
+        _print_critic_results(issues, test_results, int(fix_pass))  # type: ignore[arg-type]
+
+    project_agent.execute(session, on_task_start=on_start, on_task_done=on_done, on_critic_done=on_critic)
     _print_project_summary(session)
+
+    # Afficher le README généré
+    if session.output_dir:
+        readme = Path(session.output_dir) / "README.md"
+        if readme.exists():
+            print(_c("─" * 52, _DIM))
+            print(_c("  README.md — Comment lancer le projet", _BOLD, _CYAN))
+            print(_c("─" * 52, _DIM))
+            print(readme.read_text(encoding="utf-8"))
+            print(_c("─" * 52, _DIM))
 
 
 def _handle_special(
@@ -187,7 +278,11 @@ def _handle_special(
                     icon = _c('✓', _GREEN) if resp.success else _c('✗', _RED)
                     print(f"      {icon} score={resp.score:.2f}")
 
-                project_agent.execute(session, on_task_start=on_start, on_task_done=on_done)
+                def on_critic_resume(issues: object, test_results: object, fix_pass: object = 0) -> None:
+                    _print_critic_results(issues, test_results, int(fix_pass))  # type: ignore[arg-type]
+
+                project_agent.execute(session, on_task_start=on_start, on_task_done=on_done,
+                                      on_critic_done=on_critic_resume)
                 _print_project_summary(session)
             except FileNotFoundError:
                 print(_c(f"  Session introuvable: {session_id}", _RED))
@@ -274,3 +369,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def factorial(n: int) -> int:
+    if n == 0 or n == 1:
+        return 1
+    else:
+        return n * factorial(n - 1)

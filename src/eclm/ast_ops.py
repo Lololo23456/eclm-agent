@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 _DETERMINISTIC_OPS = frozenset({
     "ADD_PARAM", "REMOVE_PARAM", "ADD_RETURN_TYPE", "RENAME_SYMBOL",
     "ADD_IMPORT", "DELETE_NODE", "ADD_DECORATOR", "ADD_DOCSTRING",
+    "UPDATE_CALL_SITES",
 })
 
 
@@ -64,8 +65,43 @@ class ASTOperationExecutor:
             "DELETE_NODE": _DeleteNodeTransformer,
             "ADD_DECORATOR": _AddDecoratorTransformer,
             "ADD_DOCSTRING": _AddDocstringTransformer,
+            "UPDATE_CALL_SITES": _UpdateCallSitesTransformer,
         }
         return handlers[op.op_type](op)
+
+    def update_call_sites_in_project(
+        self, project_dir: "Path", old_name: str, new_name: str
+    ) -> list["Path"]:
+        """Applique UPDATE_CALL_SITES sur tous les .py du dossier projet.
+
+        Args:
+            project_dir: Racine du projet à parcourir.
+            old_name: Ancien nom du symbole.
+            new_name: Nouveau nom du symbole.
+
+        Returns:
+            Liste des fichiers modifiés.
+        """
+        from pathlib import Path
+        modified: list[Path] = []
+        op = ASTOperation(
+            op_type="UPDATE_CALL_SITES",
+            target=old_name,
+            params={"new_name": new_name},
+        )
+        for py_file in project_dir.rglob("*.py"):
+            try:
+                source = py_file.read_text(encoding="utf-8")
+                # Pré-vérification rapide — évite de parser si le nom n'est pas présent
+                if old_name not in source:
+                    continue
+                result = self.apply(source, op)
+                py_file.write_text(result, encoding="utf-8")
+                modified.append(py_file)
+                logger.info("UPDATE_CALL_SITES: %s → %s dans %s", old_name, new_name, py_file)
+            except (OSError, SyntaxError) as exc:
+                logger.debug("Skipping %s: %s", py_file, exc)
+        return modified
 
 
 # ── Transformers ──────────────────────────────────────────────────────────────
@@ -237,6 +273,45 @@ class _AddDecoratorTransformer(ast.NodeTransformer):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
         self._add(node)
+        return node
+
+
+class _UpdateCallSitesTransformer(ast.NodeTransformer):
+    """Renomme toutes les références à un symbole dans un fichier.
+
+    Gère : appels de fonctions, accès d'attributs, imports, annotations de type.
+    Ne renomme PAS la définition du symbole lui-même (c'est RENAME_SYMBOL).
+    """
+
+    def __init__(self, op: ASTOperation) -> None:
+        self._old = op.target
+        self._new = str(op.params.get("new_name", op.target))
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        if node.id == self._old:
+            return ast.Name(id=self._new, ctx=node.ctx)
+        return node
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.Attribute:
+        if node.attr == self._old:
+            node.attr = self._new
+        self.generic_visit(node)
+        return node
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.ImportFrom:
+        node.names = [
+            ast.alias(name=self._new if a.name == self._old else a.name,
+                      asname=a.asname)
+            for a in node.names
+        ]
+        return node
+
+    def visit_Import(self, node: ast.Import) -> ast.Import:
+        node.names = [
+            ast.alias(name=self._new if a.name == self._old else a.name,
+                      asname=a.asname)
+            for a in node.names
+        ]
         return node
 
 

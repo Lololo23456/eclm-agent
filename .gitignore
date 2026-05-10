@@ -1,0 +1,58 @@
+# Environnement
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Tests & outils
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+htmlcov/
+.coverage
+coverage.xml
+
+# Data générée (trop volumineuse pour git)
+data/codebase_index/
+data/projects/
+data/sessions/
+data/dpo_pairs/
+data/benchmarks/
+data/training/
+models/
+
+# Modèles ML
+*.gguf
+*.bin
+*.pt
+*.safetensors
+*.ckpt
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Fichiers générés au runtime
+generated.py
+src/config.py
+src/log.py
+
+# ChromaDB
+*.sqlite3
+
+# Secrets
+*.pem
+*.key

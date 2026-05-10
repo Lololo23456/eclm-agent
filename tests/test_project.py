@@ -116,26 +116,32 @@ class TestProjectAgent:
         assert tasks[0].action == "CREATE"
         assert tasks[0].index == 0
 
-    def test_parse_plan_valid_json(self, project_agent: ProjectAgent) -> None:
+    def test_parse_arch_valid_json(self, project_agent: ProjectAgent) -> None:
+        from src.orchestrator.architect import ArchitectAgent
+        arch = ArchitectAgent(project_agent.config)
         raw = json.dumps({
+            "tech_stack": ["fastapi"],
+            "folder_structure": ["src/"],
+            "review_gate": None,
             "tasks": [
                 {
                     "index": 0, "action": "CREATE", "target_type": "class",
                     "target_name": "User", "target_file": "models.py",
-                    "description": "User model", "depends_on": [],
+                    "description": "User model", "depends_on": [], "complexity": "low",
                 }
             ],
-            "estimated_files": ["models.py"],
         })
-        tasks = project_agent._parse_plan(raw)
-        assert tasks is not None
-        assert len(tasks) == 1
-        assert tasks[0].target_name == "User"
+        result = arch._parse_response(raw)
+        assert result is not None
+        assert len(result["tasks"]) == 1
+        assert result["tasks"][0]["target_name"] == "User"  # type: ignore[index]
 
-    def test_parse_plan_invalid_json_returns_none(
+    def test_parse_arch_invalid_json_returns_none(
         self, project_agent: ProjectAgent
     ) -> None:
-        result = project_agent._parse_plan("not json at all")
+        from src.orchestrator.architect import ArchitectAgent
+        arch = ArchitectAgent(project_agent.config)
+        result = arch._parse_response("not json at all")
         assert result is None
 
     def test_save_and_load_roundtrip(

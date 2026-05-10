@@ -8,6 +8,7 @@ import urllib.request
 
 from src.eclm.ast_ops import ASTOperationExecutor, LLMRequiredError
 from src.orchestrator.context import ASTContext
+from src.orchestrator.router import ModelRouter
 from src.shared.config import Config
 from src.shared.types import ASTCandidate, ASTOperation
 
@@ -15,8 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_markdown(code: str) -> str:
-    """Supprime les balises markdown ```python … ``` si présentes."""
+    """Extrait le code Python d'une réponse Ollama, avec ou sans markdown."""
     import re
+    # Ollama ajoute parfois du texte avant le bloc : "Voici le code :\n```python..."
+    # → on cherche le premier bloc ```...``` et on en extrait le contenu
+    match = re.search(r"```[a-zA-Z]*\n?(.*?)```", code.strip(), re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Pas de bloc markdown → supprimer les éventuels ``` résiduels
     code = re.sub(r"^```[a-zA-Z]*\n?", "", code.strip())
     code = re.sub(r"\n?```$", "", code.strip())
     return code.strip()
@@ -32,7 +39,7 @@ Code actuel de la cible:
 
 Contexte du codebase:
 {context}
-{error_block}
+{error_block}{test_rule}\
 Génère UNIQUEMENT le code Python résultant (fonction/classe complète).
 Sans explication, sans balises markdown:"""
 
@@ -54,6 +61,7 @@ class ECLMCore:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._executor = ASTOperationExecutor()
+        self._router = ModelRouter(config)
 
     def _adaptive_k(self, base_k: int, operation: ASTOperation) -> int:
         """Adapte le beam width selon la complexité de l'opération.
@@ -77,6 +85,7 @@ class ECLMCore:
         context: ASTContext,
         error: str | None = None,
         k: int = 5,
+        complexity: str = "medium",
     ) -> list[ASTCandidate]:
         """Génère jusqu'à k candidats pour une opération AST.
 
@@ -101,8 +110,9 @@ class ECLMCore:
                 except (SyntaxError, KeyError, ValueError) as exc:
                     logger.warning("AST op déterministe échouée: %s", exc)
 
-        # Génératif : beam search via Ollama (k adaptatif)
-        return self._generate_via_ollama(operation, context, error, effective_k)
+        # Génératif : beam search via Ollama (k adaptatif, modèle routé)
+        model = self._router.for_operation(operation.op_type, complexity)
+        return self._generate_via_ollama(operation, context, error, effective_k, model)
 
     def _generate_via_ollama(
         self,
@@ -110,21 +120,46 @@ class ECLMCore:
         context: ASTContext,
         error: str | None,
         k: int,
+        model: str | None = None,
     ) -> list[ASTCandidate]:
         current = context.get_target_code(operation.target) or ""
         error_block = f"\nERREUR À CORRIGER:\n{error}\n" if error else ""
+        is_test_module = (
+            operation.params.get("target_type") == "module"
+            or operation.op_type == "CREATE_MODULE"
+        )
+        is_test_fn = (
+            operation.target.startswith("test_")
+            or operation.op_type in ("TEST", "ADD_TEST")
+            or is_test_module
+        )
+        if is_test_module:
+            test_rule = (
+                "RÈGLE MODULE TEST: génère un fichier de test COMPLET avec imports, "
+                "fixtures pytest si nécessaire, et TOUTES les fonctions de test standalone "
+                "(def test_xxx(): sans paramètre 'self'). Inclure les imports du module testé.\n"
+            )
+        elif is_test_fn:
+            test_rule = (
+                "RÈGLE PYTEST: les fonctions de test sont STANDALONE — "
+                "aucun paramètre 'self', pas dans une classe (sauf si fixture explicite).\n"
+            )
+        else:
+            test_rule = ""
         prompt = _LLM_OPS_PROMPT.format(
             op_type=operation.op_type,
             target=operation.target,
             params=json.dumps(operation.params, ensure_ascii=False),
             current_code=current or "(nouveau code)",
-            context=context.format_for_prompt(max_chars=1500),
+            context=context.format_for_prompt(max_chars=2000),
             error_block=error_block,
+            test_rule=test_rule,
         )
 
+        effective_model = model or self.config.ollama_model
         candidates: list[ASTCandidate] = []
         for rank in range(k):
-            code = self._call_ollama(prompt, seed=rank)
+            code = self._call_ollama(prompt, seed=rank, model=effective_model)
             if code:
                 candidates.append(ASTCandidate(code=code, operation=operation, generation_rank=rank))
 
@@ -134,9 +169,9 @@ class ECLMCore:
 
         return candidates
 
-    def _call_ollama(self, prompt: str, seed: int) -> str:
+    def _call_ollama(self, prompt: str, seed: int, model: str | None = None) -> str:
         payload = json.dumps({
-            "model": self.config.ollama_model,
+            "model": model or self.config.ollama_model,
             "prompt": prompt,
             "stream": False,
             "options": {"seed": seed, "temperature": 0.2 + seed * 0.1},

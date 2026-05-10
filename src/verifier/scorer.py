@@ -48,11 +48,14 @@ class TypeChecker:
             f.write(code)
             tmp_path = Path(f.name)
         try:
+            # Exécuter mypy depuis le répertoire temp pour qu'il ne lise pas
+            # le pyproject.toml du projet (qui active --strict sur notre code source)
             result = subprocess.run(
-                ["mypy", "--ignore-missing-imports", "--no-error-summary", str(tmp_path)],
+                ["mypy", "--ignore-missing-imports", "--no-error-summary", tmp_path.name],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                cwd=str(tmp_path.parent),
             )
             ok = result.returncode == 0
             return ok, "" if ok else (result.stdout + result.stderr).strip()

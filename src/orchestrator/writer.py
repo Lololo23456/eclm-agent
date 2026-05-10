@@ -31,11 +31,23 @@ class FileWriter:
         Returns:
             Chemin du fichier modifié, ou None si aucune action nécessaire.
         """
+        if intent.target_type == "module":
+            # Whole-file generation (e.g. complete test modules) — always overwrite
+            return self._write_module(code, intent, project_root)
         if intent.action in _GENERATIVE_ACTIONS:
             return self._write_create(code, intent, project_root)
         if intent.action in _REPLACE_ACTIONS:
             return self._write_replace(code, intent, project_root)
         return None
+
+    # ── MODULE (whole-file overwrite) ─────────────────────────────────────────
+
+    def _write_module(self, code: str, intent: IntentJSON, project_root: Path) -> Path:
+        target = self._resolve_target_file(intent, project_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code + "\n", encoding="utf-8")
+        logger.info("Module écrit (overwrite) : %s", target)
+        return target
 
     # ── CREATE ────────────────────────────────────────────────────────────────
 

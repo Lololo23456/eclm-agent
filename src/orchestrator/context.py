@@ -39,6 +39,7 @@ class ASTContext:
 
     chunks: list[CodeChunk] = field(default_factory=list)
     target_file: str | None = None
+    dependency_context: str = ""
 
     def get_target_code(self, target_name: str) -> str | None:
         """Retourne le code source du chunk dont le nom correspond à target_name.
@@ -65,6 +66,11 @@ class ASTContext:
         """
         parts: list[str] = []
         total = 0
+
+        if self.dependency_context:
+            parts.append(self.dependency_context)
+            total += len(self.dependency_context)
+
         for chunk in self.chunks:
             block = f"# {chunk.file_path}:{chunk.start_line}\n{chunk.source}\n"
             if total + len(block) > max_chars:

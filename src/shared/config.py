@@ -21,13 +21,18 @@ class Config:
     confidence_threshold: float = float(os.getenv("ECLM_CONFIDENCE_THRESHOLD", "0.75"))
     min_verification_score: float = float(os.getenv("ECLM_MIN_VERIFICATION_SCORE", "0.8"))
 
-    # Ollama (C2 stand-in jusqu'à l'entraînement de l'ECLMCore)
+    # Ollama — serveur principal
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+    # Model Router — fast (vérification, ops simples) vs strong (planning, génération complexe)
+    fast_model: str = os.getenv("ECLM_FAST_MODEL", "qwen2.5-coder:7b")
+    strong_model: str = os.getenv("ECLM_STRONG_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"))
 
     # Performance — M3 Air optimisations
     prefer_local_sandbox: bool = os.getenv("ECLM_LOCAL_SANDBOX", "true").lower() == "true"
     adaptive_beam_width: bool = os.getenv("ECLM_ADAPTIVE_BEAM", "true").lower() == "true"
+    max_parallel_tasks: int = int(os.getenv("ECLM_MAX_PARALLEL_TASKS", "3"))
 
     # Docker
     docker_image: str = os.getenv("ECLM_DOCKER_IMAGE", "eclm-sandbox:latest")

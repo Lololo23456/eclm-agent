@@ -35,6 +35,63 @@ def _write_test_files(workdir: Path, code: str, tests: list[str]) -> None:
     (workdir / "test_solution.py").write_text(test_code, encoding="utf-8")
 
 
+def _write_project_files(
+    workdir: Path,
+    code: str,
+    target_filename: str,
+    project_files: dict[str, str],
+    behavior_tests: list[str],
+) -> None:
+    """Reconstruit l'arborescence projet dans workdir pour un test contextualisé."""
+    # Écrire les fichiers de contexte (dépendances)
+    for rel_path, content in project_files.items():
+        dest = workdir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+
+    # Écrire le code candidat à sa position dans le projet
+    target = workdir / target_filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        existing = target.read_text(encoding="utf-8")
+        target.write_text(existing.rstrip() + "\n\n" + code + "\n", encoding="utf-8")
+    else:
+        target.write_text(code + "\n", encoding="utf-8")
+
+    # Créer __init__.py manquants pour que les imports fonctionnent
+    for p in workdir.rglob("*.py"):
+        pkg = p.parent
+        if pkg != workdir and not (pkg / "__init__.py").exists():
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+
+    # Tests comportement — fichier séparé
+    if behavior_tests:
+        test_body = "\n\n".join(behavior_tests)
+        (workdir / "test_behavior.py").write_text(
+            f"import pytest\nimport sys, os\n"
+            f"sys.path.insert(0, os.path.dirname(__file__))\n\n{test_body}\n",
+            encoding="utf-8",
+        )
+
+
+def _run_pytest(workdir: Path, timeout: int, backend: str) -> SandboxResult:
+    """Lance pytest dans workdir et retourne le résultat."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", ".", "-q", "--tb=short", "--no-header"],
+            capture_output=True, text=True,
+            timeout=timeout,
+            cwd=str(workdir),
+        )
+        return SandboxResult(
+            exit_code=proc.returncode, stdout=proc.stdout,
+            stderr=proc.stderr, backend=backend,
+        )
+    except subprocess.TimeoutExpired:
+        return SandboxResult(exit_code=-1, stdout="", stderr="Timeout",
+                             timed_out=True, backend=backend)
+
+
 class DockerSandbox:
     """Exécute du code Python dans un container Docker isolé sans réseau.
 
@@ -62,6 +119,21 @@ class DockerSandbox:
             workdir = Path(tmpdir)
             _write_test_files(workdir, code, tests)
             return self._run_container(workdir)
+
+    def run_with_project_files(
+        self,
+        code: str,
+        target_filename: str,
+        behavior_tests: list[str],
+        project_files: dict[str, str],
+    ) -> SandboxResult:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            _write_project_files(workdir, code, target_filename, project_files, behavior_tests)
+            return self._run_container(workdir)
+
+    def run_project_tests(self, output_dir: Path) -> SandboxResult:
+        return self._run_container(output_dir)
 
     def _run_container(self, workdir: Path) -> SandboxResult:
         cmd = [
@@ -102,35 +174,45 @@ class LocalSandbox:
         self.config = config
 
     def run(self, code: str, tests: list[str]) -> SandboxResult:
-        """Exécute code + tests via subprocess Python local.
-
-        Args:
-            code: Code Python source à évaluer.
-            tests: Corps de fonctions pytest à exécuter.
-
-        Returns:
-            SandboxResult avec backend="local".
-        """
+        """Exécute code + tests via subprocess Python local."""
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
             _write_test_files(workdir, code, tests)
-            return self._run_local(workdir)
+            return _run_pytest(workdir, self.config.docker_timeout_seconds, "local")
 
-    def _run_local(self, workdir: Path) -> SandboxResult:
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "pytest", "test_solution.py", "-q", "--tb=short"],
-                capture_output=True, text=True,
-                timeout=self.config.docker_timeout_seconds,
-                cwd=str(workdir),
-            )
-            return SandboxResult(
-                exit_code=proc.returncode, stdout=proc.stdout,
-                stderr=proc.stderr, backend="local",
-            )
-        except subprocess.TimeoutExpired:
-            return SandboxResult(exit_code=-1, stdout="", stderr="Timeout",
-                                 timed_out=True, backend="local")
+    def run_with_project_files(
+        self,
+        code: str,
+        target_filename: str,
+        behavior_tests: list[str],
+        project_files: dict[str, str],
+    ) -> SandboxResult:
+        """Exécute code dans le contexte de l'arborescence projet.
+
+        Args:
+            code: Code candidat (une fonction/classe/module).
+            target_filename: Chemin relatif du fichier cible dans le projet.
+            behavior_tests: Tests comportement à exécuter.
+            project_files: Dict {chemin_relatif: contenu} des fichiers du projet.
+
+        Returns:
+            SandboxResult avec backend="local_project".
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            _write_project_files(workdir, code, target_filename, project_files, behavior_tests)
+            return _run_pytest(workdir, self.config.docker_timeout_seconds, "local_project")
+
+    def run_project_tests(self, output_dir: Path) -> SandboxResult:
+        """Lance pytest directement sur le dossier output d'un projet généré.
+
+        Args:
+            output_dir: Dossier contenant les fichiers générés (avec tests/).
+
+        Returns:
+            SandboxResult avec le rapport pytest complet.
+        """
+        return _run_pytest(output_dir, self.config.docker_timeout_seconds * 2, "local_project_full")
 
 
 def auto_sandbox(config: Config) -> DockerSandbox | LocalSandbox:
