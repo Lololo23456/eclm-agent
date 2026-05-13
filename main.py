@@ -343,6 +343,25 @@ def run_repl(project_root: Path, config: Config) -> None:
         print()
 
 
+def _run_from_plan(plan_path: Path, output_dir: Path, config: Config) -> None:
+    """Lance le pipeline multi-agents depuis un plan.json généré par /plan."""
+    from src.pipeline import AgentPipeline
+
+    if not plan_path.exists():
+        print(f"Plan introuvable : {plan_path}")
+        sys.exit(1)
+
+    pipeline = AgentPipeline(config, output_dir=output_dir)
+    result = pipeline.run_from_plan(plan_path)
+
+    ok = sum(1 for r in result.task_results if r.success)
+    total = len(result.task_results)
+    print(f"Pipeline terminé : {ok}/{total} tâches · avg_score={result.avg_score:.2f}")
+    if output_dir:
+        print(f"Projet généré dans : {output_dir}")
+    sys.exit(0 if result.avg_score >= config.min_verification_score else 1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ECLM Agent — Assistant de codage IA local")
     parser.add_argument(
@@ -350,6 +369,20 @@ def main() -> None:
         type=Path,
         default=Path("."),
         help="Racine du projet cible (défaut: répertoire courant)",
+    )
+    parser.add_argument(
+        "--from-plan",
+        type=Path,
+        default=None,
+        metavar="PLAN_JSON",
+        help="Exécute le pipeline multi-agents depuis un plan.json (généré par /plan)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Dossier de sortie pour --from-plan (défaut: data/projects/<plan_name>/)",
     )
     parser.add_argument(
         "--log-level",
@@ -364,6 +397,18 @@ def main() -> None:
     )
 
     config = Config(root_dir=args.project.resolve())
+
+    if args.from_plan:
+        plan_path = args.from_plan.resolve()
+        output_dir = args.output_dir
+        if output_dir is None:
+            import json
+            plan = json.loads(plan_path.read_text())
+            name = plan.get("name", plan_path.stem)
+            output_dir = config.data_dir / "projects" / name
+        _run_from_plan(plan_path, output_dir.resolve(), config)
+        return
+
     run_repl(project_root=args.project.resolve(), config=config)
 
 
