@@ -2,8 +2,31 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _detect_vram_gb() -> int:
+    """Retourne la VRAM disponible en GB (0 si pas de GPU NVIDIA détecté)."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip().split("\n")[0]
+        return int(out) // 1024
+    except Exception:
+        return 0
+
+
+def _auto_model(vram_gb: int) -> str:
+    """Choisit le meilleur modèle Ollama selon la VRAM disponible."""
+    if vram_gb >= 20:
+        return "qwen2.5-coder:32b"
+    if vram_gb >= 10:
+        return "qwen2.5-coder:14b"
+    return "qwen2.5-coder:7b"
 
 
 @dataclass
@@ -26,10 +49,17 @@ class Config:
     ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 
     # Model Router — fast (vérification, ops simples) vs strong (planning, génération complexe)
+    # Si non défini en env, auto-détecte selon VRAM au démarrage
     fast_model: str = os.getenv("ECLM_FAST_MODEL", "qwen2.5-coder:7b")
-    strong_model: str = os.getenv("ECLM_STRONG_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"))
+    strong_model: str = field(default="")  # résolu dans __post_init__
 
-    # Performance — M3 Air optimisations
+    # Claude API — tier cloud optionnel
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    claude_fast_model: str = "claude-haiku-4-5-20251001"
+    claude_strong_model: str = "claude-sonnet-4-6"
+    use_claude_api: bool = False  # résolu dans __post_init__
+
+    # Performance
     prefer_local_sandbox: bool = os.getenv("ECLM_LOCAL_SANDBOX", "true").lower() == "true"
     adaptive_beam_width: bool = os.getenv("ECLM_ADAPTIVE_BEAM", "true").lower() == "true"
     max_parallel_tasks: int = int(os.getenv("ECLM_MAX_PARALLEL_TASKS", "3"))
@@ -53,6 +83,19 @@ class Config:
             self.data_dir = self.root_dir / self.data_dir
         if not self.models_dir.is_absolute():
             self.models_dir = self.root_dir / self.models_dir
+
+        # Auto-détecter le modèle strong selon la VRAM si non défini
+        if not self.strong_model:
+            env_strong = os.getenv("ECLM_STRONG_MODEL", "")
+            if env_strong:
+                self.strong_model = env_strong
+            else:
+                vram = _detect_vram_gb()
+                self.strong_model = _auto_model(vram)
+
+        # Activer Claude API si clé présente et non désactivée explicitement
+        if self.anthropic_api_key and os.getenv("ECLM_USE_CLAUDE_API", "auto") != "false":
+            self.use_claude_api = True
 
     @classmethod
     def for_testing(cls) -> Config:
