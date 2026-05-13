@@ -330,6 +330,88 @@ def chat_completions(req: ChatRequest) -> ChatResponse:
     )
 
 
+# ── Pipeline multi-agents ──────────────────────────────────────────────────────
+
+class PipelineRunRequest(BaseModel):
+    plan: dict  # type: ignore[type-arg]  # plan.json complet
+    output_dir: str | None = None
+
+
+class PipelineRunResponse(BaseModel):
+    success: bool
+    plan_name: str
+    tasks_ok: int
+    tasks_total: int
+    avg_score: float
+    output_dir: str | None = None
+    integration_issues: int = 0
+
+
+class PlanGenerateRequest(BaseModel):
+    brief: str
+    model: str = "qwen2.5-coder:7b"
+
+
+@app.post("/v1/pipeline/run", response_model=PipelineRunResponse)
+def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
+    """Exécute le pipeline multi-agents depuis un plan JSON.
+
+    Accepte directement le contenu de plan.json (pas un chemin).
+    Appel depuis MacBook vers serveur Linux :
+      curl -X POST http://serveur:8765/v1/pipeline/run \\
+        -H 'Content-Type: application/json' \\
+        -d @data/plans/mon_plan.json | jq  # envelopper dans {"plan": ...}
+    """
+    import tempfile
+    from src.pipeline import AgentPipeline
+
+    assert _config is not None
+
+    plan = req.plan
+    name = plan.get("name", "pipeline")
+
+    # Écrire le plan dans un fichier temporaire
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        json.dump(plan, f, ensure_ascii=False)
+        plan_path = Path(f.name)
+
+    output_dir = Path(req.output_dir) if req.output_dir else (
+        (_config.data_dir / "projects" / name)
+    )
+
+    pipeline = AgentPipeline(_config, output_dir=output_dir)
+    result = pipeline.run_from_plan(plan_path)
+    plan_path.unlink(missing_ok=True)
+
+    ok = sum(1 for r in result.task_results if r.success)
+    errors = [i for i in result.integration_issues if i.severity == "error"]
+
+    return PipelineRunResponse(
+        success=result.avg_score >= _config.min_verification_score,
+        plan_name=result.plan_name,
+        tasks_ok=ok,
+        tasks_total=len(result.task_results),
+        avg_score=round(result.avg_score, 3),
+        output_dir=str(output_dir),
+        integration_issues=len(errors),
+    )
+
+
+@app.post("/v1/pipeline/plan")
+def pipeline_generate_plan(req: PlanGenerateRequest) -> dict:  # type: ignore[type-arg]
+    """Génère un plan.json depuis un brief via Ollama local (zéro token Claude)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from scripts.generate_plan import generate_plan
+
+    assert _config is not None
+    output_path = _config.data_dir / "plans" / f"{req.brief[:30].replace(' ', '_')}.json"
+    generate_plan(req.brief, _config.ollama_base_url, req.model, output_path)
+    return json.loads(output_path.read_text(encoding="utf-8"))
+
+
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 def create_app(project_root: Path | None = None, config: Config | None = None) -> FastAPI:

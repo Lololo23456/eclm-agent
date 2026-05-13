@@ -170,8 +170,10 @@ class AgentPipeline:
             if not candidates:
                 break
 
-            # Vérifier le meilleur
-            best_candidate, score, error = self._verify_candidates(candidates, tests, target_file)
+            # Vérifier le meilleur (avec contexte des fichiers déjà générés)
+            best_candidate, score, error = self._verify_candidates(
+                candidates, tests, target_file, project_files=project_files
+            )
             if score > best_score:
                 best_score = score
                 best_code = best_candidate
@@ -186,7 +188,9 @@ class AgentPipeline:
                 fix_result = self._fixer.run(best_code, error or "score trop bas", enriched_task, tests)
                 if fix_result.success:
                     fixed_code = fix_result.output
-                    _, fixed_score, _ = self._verify_candidates([fixed_code], tests, target_file)
+                    _, fixed_score, _ = self._verify_candidates(
+                        [fixed_code], tests, target_file, project_files=project_files
+                    )
                     if fixed_score > best_score:
                         best_score = fixed_score
                         best_code = fixed_code
@@ -218,6 +222,7 @@ class AgentPipeline:
         candidates: list[str],
         tests: list[str],
         target_file: str,
+        project_files: dict[str, str] | None = None,
     ) -> tuple[str, float, str | None]:
         """Vérifie les candidats, retourne (meilleur_code, meilleur_score, erreur)."""
         ast_candidates = [
@@ -228,10 +233,14 @@ class AgentPipeline:
             )
             for i, c in enumerate(candidates)
         ]
+        # target_filename = juste le nom du fichier (ex: "models.py")
+        target_filename = Path(target_file).name
         result: VerificationResult = self._verifier.verify(
             ast_candidates,
             behavior_tests=tests,
             impl_tests=[],
+            project_files=project_files if project_files else None,
+            target_filename=target_filename,
         )
         error = result.error_message
         return result.candidate.code, result.composite_score, error
